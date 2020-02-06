@@ -38,6 +38,64 @@ import tensorflow as tf
 # In[ ]:
 
 
+def py_cpu_softnms(dets, scores, sigma=0.5):
+    # indexes concatenate boxes with the last column
+    N = dets.shape[0]
+    indexes = np.array([np.arange(N)])
+    dets = np.concatenate((dets, indexes.T), axis=1)
+
+    # the order of boxes coordinate is [y1,x1,y2,x2]
+    x1 = dets[:, 0]
+    y1 = dets[:, 1]
+    x2 = dets[:, 2]
+    y2 = dets[:, 3]
+    areas = (x2 - x1 + 1) * (y2 - y1 + 1)
+
+    for i in range(N):
+        # intermediate parameters for later parameters exchange
+        tBD = dets[i, :].copy()
+        tscore = scores[i].copy()
+        tarea = areas[i].copy()
+        pos = i + 1
+
+        #
+        if i != N - 1:
+            maxscore = np.max(scores[pos:], axis=0)
+            maxpos = np.argmax(scores[pos:], axis=0)
+        else:
+            maxscore = scores[-1]
+            maxpos = 0
+        if tscore < maxscore:
+            dets[i, :] = dets[maxpos + i + 1, :]
+            dets[maxpos + i + 1, :] = tBD
+            tBD = dets[i, :]
+
+            scores[i] = scores[maxpos + i + 1]
+            scores[maxpos + i + 1] = tscore
+            tscore = scores[i]
+
+            areas[i] = areas[maxpos + i + 1]
+            areas[maxpos + i + 1] = tarea
+            tarea = areas[i]
+
+        # IoU calculate
+        xx1 = np.maximum(dets[i, 0], dets[pos:, 0])
+        yy1 = np.maximum(dets[i, 1], dets[pos:, 1])
+        xx2 = np.minimum(dets[i, 2], dets[pos:, 2])
+        yy2 = np.minimum(dets[i, 3], dets[pos:, 3])
+
+        w = np.maximum(0.0, xx2 - xx1 + 1)
+        h = np.maximum(0.0, yy2 - yy1 + 1)
+        inter = w * h
+        ovr = inter / (areas[i] + areas[pos:] - inter)
+
+        weight = np.exp(-(ovr * ovr) / sigma)
+
+        scores[pos:] = weight * scores[pos:]
+
+    return dets[:, :4], scores
+
+
 def render_videos(model, input_glob_path, destination_path):
     for vid in glob.glob(input_glob_path):
         vid_parts = vid.split('/')
@@ -58,9 +116,6 @@ def render_videos(model, input_glob_path, destination_path):
         rec = cv2.VideoWriter(destination_path.format(
             row, action, pass_count, filename), fourcc, fps, (width, height))
 
-        false_positives = 0
-        false_negatives = 0
-        true_positives = 0
         # load image
         # image = read_image_bgr('000000008021.jpg')
         start = time.time()
@@ -86,14 +141,33 @@ def render_videos(model, input_glob_path, destination_path):
 
             # correct for image scale
             boxes /= scale
-            predicted_pass_count = 0
-            # visualize detections
+            label_dicts = {}
             for box, score, label in zip(boxes[0], scores[0], labels[0]):
+                if label == -1:
+                    continue
+                if label not in label_dicts:
+                    label_dicts[label] = {'boxes': [box], 'scores': [score]}
+                else:
+                    label_dicts[label]['boxes'].append(box)
+                    label_dicts[label]['scores'].append(score)
+            all_boxes = []
+            all_scores = []
+            all_labels = []
+            for label in label_dicts:
+                boxes = np.array(label_dicts[label]['boxes'])
+                scores = np.array(label_dicts[label]['scores'])
+                new_boxes, new_scores = py_cpu_softnms(
+                    boxes, scores, sigma=0.5)
+                for box, score in zip(new_boxes, new_scores):
+
+                    all_boxes.append(box)
+                    all_scores.append(score)
+                    all_labels.append(label)
+            # visualize detections
+            for box, score, label in zip(all_boxes, all_scores, all_labels):
                 # scores are sorted so we can break
                 if score < 0.5:
-                    break
-                if labels_to_names[label] == 'person':
-                    predicted_pass_count += 1
+                    continue
                 color = label_color(label)
 
                 b = box.astype(int)
@@ -101,12 +175,7 @@ def render_videos(model, input_glob_path, destination_path):
 
                 caption = "{} {:.3f}".format(labels_to_names[label], score)
                 draw_caption(draw, b, caption)
-            if predicted_pass_count == pass_count:
-                true_positives += 1
-            elif predicted_pass_count > pass_count:
-                false_positives += 1
-            elif predicted_pass_count < pass_count:
-                false_negatives += 1
+
                 # plt.figure(figsize=(15, 15))
                 # plt.axis('off')
                 # plt.imshow(draw)
@@ -120,14 +189,6 @@ def render_videos(model, input_glob_path, destination_path):
             "processing time: {} for video: {}".format(
                 time.time() - start, vid))
 
-        with open(destination_path.format(row, action, pass_count, vid_name + '.csv'), 'w') as f:
-            f.write('true_positives,false_positives,false_negatives\n')
-            f.write(
-                '{},{},{}'.format(
-                    true_positives,
-                    false_positives,
-                    false_negatives))
-
         cap.release()
         rec.release()
 
@@ -137,32 +198,24 @@ if __name__ == '__main__':
     # adjust this to point to your downloaded/trained model
     # models can be downloaded here:
     # https://github.com/fizyr/keras-retinanet/releases
-    for model_path in glob.glob(
-            '/home/ubuntu/snapshots_to_test_2/resnet50_csv_*.h5'):
-        snapshot_number = int(model_path.split(
-            '/')[-1].split('.')[0].split('_')[-1])
-        # if snapshot_number % 5 != 0:
-        #     continue
-        # load retinanet model
-        model = models.load_model(model_path, backbone_name='resnet50')
+    model_path = '/home/vinit/keras_model/resnet50_csv_09.h5'
+    # if snapshot_number % 5 != 0:
+    #     continue
+    # load retinanet model
+    model = models.load_model(model_path, backbone_name='resnet50')
 
-        # if the model is not converted to an inference model, use the line below
-        # see:
-        # https://github.com/fizyr/keras-retinanet#converting-a-training-model-to-inference-model
-        model = models.convert_model(model)
+    # if the model is not converted to an inference model, use the line below
+    # see:
+    # https://github.com/fizyr/keras-retinanet#converting-a-training-model-to-inference-model
+    model = models.convert_model(model)
 
-        # print(model.summary())
+    # print(model.summary())
 
-        # load label to names mapping for visualization purposes
-        labels_to_names = {0: 'person', 1: 'seatbelt'}
+    # load label to names mapping for visualization purposes
+    labels_to_names = {1: 'person', 0: 'seatbelt'}
 
-        input_glob_path = '/home/ubuntu/videos/**/**/**/*'
-        destination_path = '/home/ubuntu/render_videos_2/{}/{}/{}/{}/{}'.format(
-            snapshot_number, '{}', '{}', '{}', '{}')
-        snapshot_render_path = '/'.join(destination_path.split('/')[:5])
-        if os.path.exists(snapshot_render_path):
-            continue
-        render_videos(model, input_glob_path, destination_path)
+    input_glob_path = '/home/vinit/Desktop/test_nauto/processed/**/**/**/*'
+    # input_glob_path = '/home/vinit/Desktop/test_nauto/processed/front/driving/2/*'
+    destination_path = '/home/vinit/Desktop/rendered_videos/{}/{}/{}/{}'
 
-        model = None
-        tf.reset_default_graph()
+    render_videos(model, input_glob_path, destination_path)
