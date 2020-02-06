@@ -24,7 +24,8 @@ import matplotlib.pyplot as plt
 import cv2
 import os
 import numpy as np
-import time
+# import timea
+from timeit import default_timer as time
 
 # set tf backend to allow memory to grow, instead of claiming everything
 import tensorflow as tf
@@ -102,10 +103,10 @@ def render_video(model, video_path, destination_path):
     rec = cv2.VideoWriter(destination_path +
                           filename, fourcc, fps, (width, height))
 
-    start = time.time()
-
+    # start = time.time()
+    nms_times = []
     while cap.isOpened():
-        ret, frame = cap.read()
+        ret, image = cap.read()
         if not ret:
             break
         # copy to draw on
@@ -134,6 +135,7 @@ def render_video(model, video_path, destination_path):
         all_boxes = []
         all_scores = []
         all_labels = []
+        nms_start_time = time()
         for label in label_dicts:
             boxes = np.array(label_dicts[label]['boxes'])
             scores = np.array(label_dicts[label]['scores'])
@@ -144,6 +146,7 @@ def render_video(model, video_path, destination_path):
                 all_boxes.append(box)
                 all_scores.append(score)
                 all_labels.append(label)
+        nms_times.append(time() - nms_start_time)
         # visualize detections
         for box, score, label in zip(all_boxes, all_scores, all_labels):
             # scores are sorted so we can break
@@ -159,12 +162,13 @@ def render_video(model, video_path, destination_path):
 
         rec.write(draw)
 
-    print(
-        "processing time: {} for video: {}".format(
-            time.time() - start, video_path))
+    # print(
+    #     "processing time: {} for video: {}".format(
+    #         time.time() - start, video_path))
 
     cap.release()
     rec.release()
+    print(np.median(nms_times))
 
 if __name__ == '__main__':
     # ENTER THE PATH TO THE MODEL .h5 FILE HERE
@@ -178,7 +182,7 @@ if __name__ == '__main__':
     labels_to_names = {1: 'person', 0: 'seatbelt'}
 
     # ENTER THE PATH TO THE INPUT VIDEO HERE
-    video_path = '/home/vinit/filename.mov'
+    video_path = '/home/vinit/Desktop/test_nauto/processed/front/driving/2/4:15-5:15_0.mp4'
 
     # ENTER THE OUTPUT DIRECTORY HERE
     destination_path = '/home/vinit/Desktop/'
